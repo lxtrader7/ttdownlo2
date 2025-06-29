@@ -1,14 +1,18 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 import yt_dlp
 import uuid
 import os
 
 app = FastAPI()
 
+# Modelo para solicitudes POST
 class VideoRequest(BaseModel):
     video_url: str
 
+# Endpoint principal para solicitudes POST
 @app.post("/process-tiktok")
 async def process_tiktok(req: VideoRequest):
     video_url = req.video_url
@@ -33,11 +37,16 @@ async def process_tiktok(req: VideoRequest):
         video_path = f"{output_path}/{video_file}"
 
         return {
-            "video_url": f"https://yourapp.onrender.com/static/{video_id}/{video_file}"
+            "video_url": f"https://ttdownlo2.onrender.com/static/{video_id}/{video_file}"
         }
-    except Exception as e:
-        return {"error": str(e)}
 
-# Archivos estáticos para acceso al video
-from fastapi.staticfiles import StaticFiles
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+# Montar carpeta 'videos' como archivos estáticos
 app.mount("/static", StaticFiles(directory="videos", html=True), name="static")
+
+# (Opcional) Ruta GET para pruebas rápidas vía navegador
+@app.get("/")
+async def handle_get_url(url: str):
+    return await process_tiktok(VideoRequest(video_url=url))
