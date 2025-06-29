@@ -2,6 +2,6 @@ fastapi
 uvicorn
 yt-dlp
 moviepy
-openai
+openai==0.28
 whisper
 python-dotenv
