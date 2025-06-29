@@ -4,3 +4,4 @@ yt-dlp
 moviepy
 openai
 whisper
+python-dotenv
