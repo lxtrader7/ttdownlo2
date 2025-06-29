@@ -1,4 +1,6 @@
 fastapi
 uvicorn
 yt-dlp
+moviepy
 openai
+whisper
