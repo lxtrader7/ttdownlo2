@@ -4,12 +4,14 @@ import yt_dlp
 import uuid
 import os
 import openai
+import subprocess
 from fastapi.staticfiles import StaticFiles
-from moviepy.editor import VideoFileClip
 from dotenv import load_dotenv
 
+# Cargar las variables de entorno
 load_dotenv()
 
+# Configurar la API Key de OpenAI
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
 app = FastAPI()
@@ -35,16 +37,20 @@ async def process_tiktok(req: VideoRequest):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([video_url])
 
+        # Encontrar archivo de video descargado
         files = os.listdir(output_path)
         video_file = next(f for f in files if f.endswith(('.mp4', '.mkv', '.webm')))
         video_path = f"{output_path}/{video_file}"
 
-        # Extraer audio a mp3
+        # Extraer audio con ffmpeg
         audio_file_path = f"{output_path}/audio.mp3"
-        clip = VideoFileClip(video_path)
-        clip.audio.write_audiofile(audio_file_path)
+        subprocess.run([
+            "ffmpeg", "-i", video_path,
+            "-vn", "-acodec", "libmp3lame",
+            audio_file_path
+        ], check=True)
 
-        # Transcripción con Whisper
+        # Transcribir el audio con Whisper
         with open(audio_file_path, "rb") as audio_file:
             transcript = openai.Audio.transcribe(
                 model="whisper-1",
@@ -59,5 +65,5 @@ async def process_tiktok(req: VideoRequest):
     except Exception as e:
         return {"error": str(e)}
 
-# Servir archivos estáticos
+# Servir archivos estáticos para acceso al video
 app.mount("/static", StaticFiles(directory="videos", html=True), name="static")
