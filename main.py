@@ -29,22 +29,10 @@ def is_tiktok_photo(url: str) -> bool:
 def force_tiktok_video(url: str) -> str:
     m = TT_RE.search(url or "")
     if not m:
-        # fallback simple si solo quieres reemplazar la palabra
+        # fallback simple si solo quieres reemplazar la palabra (no rompe otros dominios)
         return (url or "").replace("/photo/", "/video/")
     user, tt_id = m.group(1), m.group(2)
     return f"https://www.tiktok.com/@{user}/video/{tt_id}"
-
-def has_audio_stream(video_path: str) -> bool:
-    try:
-        # Usa ffprobe para detectar si hay alguna pista de audio
-        result = subprocess.run(
-            ["ffprobe", "-v", "error", "-of", "flat", "-show_streams", video_path],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=True
-        )
-        return "streams.stream[].codec_type=\"audio\"" in result.stdout or "codec_type=\"audio\"" in result.stdout
-    except Exception:
-        # Si no podemos probar, seguimos e intentamos extraer audio
-        return True
 # ------------------------------------------------------
 
 @app.post("/process-tiktok")
@@ -57,82 +45,99 @@ async def process_tiktok(req: VideoRequest):
     output_path = f"videos/{video_id}"
     os.makedirs(output_path, exist_ok=True)
 
-    # yt-dlp config (no tocamos nada crítico)
-    ydl_opts = {
+    # Config general para video
+    ydl_opts_video = {
         'format': 'bestvideo+bestaudio/best',
         'outtmpl': f'{output_path}/tiktok.%(ext)s',
         'merge_output_format': 'mp4',
         'noprogress': True,
-        # Si tienes temas de región/edad, puedes usar cookies con:
-        # 'cookiefile': os.getenv("YT_DLP_COOKIES_FILE")  # ruta a cookies.txt
     }
 
-    def try_download(url: str) -> str:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    def try_download_video(url: str) -> str | None:
+        """Intenta descargar un contenedor de video. Retorna filename o None si no hay video."""
+        with yt_dlp.YoutubeDL(ydl_opts_video) as ydl:
             ydl.download([url])
-        # Encontrar archivo de video descargado
         files = os.listdir(output_path)
-        video_file = next((f for f in files if f.lower().endswith(('.mp4', '.mkv', '.webm'))), None)
-        if not video_file:
-            raise RuntimeError("No se encontró el archivo de video descargado.")
-        return video_file
+        return next((f for f in files if f.lower().endswith(('.mp4', '.mkv', '.webm'))), None)
+
+    # Config para audio-only (fallback para slideshow)
+    ydl_opts_audio = {
+        'format': 'bestaudio/best',
+        'outtmpl': f'{output_path}/audio.%(ext)s',
+        'noprogress': True,
+        # Extrae directo a MP3 (evita tu paso de ffmpeg aparte cuando no hay video)
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192'
+        }]
+    }
+
+    def try_download_audio(url: str) -> str | None:
+        """Descarga solo el audio y lo deja como MP3. Retorna path del mp3 o None."""
+        with yt_dlp.YoutubeDL(ydl_opts_audio) as ydl:
+            ydl.download([url])
+        files = os.listdir(output_path)
+        mp3 = next((f for f in files if f.lower().endswith('.mp3')), None)
+        return f"{output_path}/{mp3}" if mp3 else None
 
     try:
         # 1) Intento directo con la URL original (sea /video/ o /photo/)
+        normalized_url_used = original_url
+        video_file = None
+
         try:
-            video_file = try_download(original_url)
-            normalized_url_used = original_url
+            video_file = try_download_video(normalized_url_used)
         except Exception as first_err:
-            # 2) Solo si es TikTok /photo/ probamos fallback a /video/
+            # 2) Si es TikTok/photo, intento fallback cambiando a /video/
             if is_tiktok_photo(original_url):
-                fallback_url = force_tiktok_video(original_url)
-                video_file = try_download(fallback_url)
-                normalized_url_used = fallback_url
+                normalized_url_used = force_tiktok_video(original_url)
+                video_file = try_download_video(normalized_url_used)
             else:
-                # No es caso TikTok/photo: propaga el error original
                 raise first_err
 
-        video_path = f"{output_path}/{video_file}"
+        audio_file_path = None
 
-        # Si no hay audio, retornamos info clara sin romper
-        if not has_audio_stream(video_path):
-            return {
-                "video_url": f"https://ttdownlo2.onrender.com/static/{video_id}/{video_file}",
-                "no_audio": True,
-                "message": "El post no tiene pista de audio (común en algunos TikTok de tipo photo).",
-                "normalized_url_used": normalized_url_used
-            }
-
-        # Extraer audio con ffmpeg (sobrescribe si existe)
-        audio_file_path = f"{output_path}/audio.mp3"
-        try:
+        if video_file:
+            # Si sí hay video, extrae audio con ffmpeg (tu flujo original)
+            video_path = f"{output_path}/{video_file}"
+            audio_file_path = f"{output_path}/audio.mp3"
             subprocess.run([
                 "ffmpeg", "-y", "-i", video_path,
                 "-vn", "-acodec", "libmp3lame",
                 audio_file_path
             ], check=True)
-        except subprocess.CalledProcessError as fferr:
-            # Si ffmpeg falla por falta de audio, lo indicamos de forma amable
-            return {
-                "video_url": f"https://ttdownlo2.onrender.com/static/{video_id}/{video_file}",
-                "no_audio": True,
-                "message": "No se pudo extraer audio (probablemente el post no tiene pista de audio).",
-                "normalized_url_used": normalized_url_used,
-                "ffmpeg_error": str(fferr)
-            }
+        else:
+            # 3) No hay contenedor de video (común en TikTok photo) → baja solo el audio
+            audio_file_path = try_download_audio(normalized_url_used)
+            if not audio_file_path and is_tiktok_photo(original_url) and normalized_url_used == original_url:
+                # último intento: si aún no hicimos el fallback, forzamos /video/ y probamos audio
+                normalized_url_used = force_tiktok_video(original_url)
+                audio_file_path = try_download_audio(normalized_url_used)
 
-        # Transcribir el audio con Whisper
+            if not audio_file_path:
+                return {"error": "No se encontró el archivo de video y no se pudo obtener el audio."}
+
+        # 4) Transcribir el audio con Whisper
         with open(audio_file_path, "rb") as audio_file:
             transcript = openai.Audio.transcribe(
                 model="whisper-1",
                 file=audio_file
             )
 
-        return {
-            "video_url": f"https://ttdownlo2.onrender.com/static/{video_id}/{video_file}",
+        # 5) Armar respuesta
+        resp = {
             "transcription": transcript.get("text", ""),
-            "normalized_url_used": normalized_url_used  # útil para depurar
+            "normalized_url_used": normalized_url_used  # útil para debug
         }
+        # Expón el video si existe
+        if video_file:
+            resp["video_url"] = f"https://ttdownlo2.onrender.com/static/{video_id}/{video_file}"
+        else:
+            # deja un link al folder por si quieres inspeccionar el MP3
+            resp["audio_only"] = True
+
+        return resp
 
     except Exception as e:
         return {"error": str(e)}
